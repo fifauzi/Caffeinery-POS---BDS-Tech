@@ -1,0 +1,453 @@
+package com.example.data.local
+
+import android.content.Context
+import android.content.SharedPreferences
+import com.example.domain.model.AdditionalFeesConfig
+import com.example.domain.model.EmployeeItem
+import com.example.domain.model.OrderMethodsConfig
+import com.example.domain.model.OutletInfo
+import com.example.domain.model.PaymentGatewaysConfig
+import com.example.domain.model.ReceiptCustomizerConfig
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * Local Data Persistence Layer for all POS settings:
+ * - Outlet Information (Name, Branch, Address, Phone, NPWP, Instagram/Social)
+ * - Receipt Display Customization (Paper Size, Header, Footer, Logo, Tax Toggle)
+ * - Tax & Service Charge (PB1 Tax %, Service Fee %, Rounding)
+ * - Payment Gateways (Cash, QRIS NMID/Merchant, Bank Transfer accounts)
+ * - Order Methods (Dine-in, Takeaway, Online Delivery, Table Number)
+ * - Employee List, Active Logged-in Cashier, and Active Shift
+ * - Selected Bluetooth Thermal Printer
+ *
+ * Persisted permanently across app restarts, reboots, and cold starts via SharedPreferences.
+ */
+class SettingsStorageService(context: Context) {
+
+    private val prefs: SharedPreferences = context.getSharedPreferences(
+        PREFS_NAME,
+        Context.MODE_PRIVATE
+    )
+
+    companion object {
+        private const val PREFS_NAME = "caffeinery_pos_settings_prefs"
+
+        private const val KEY_OUTLET_INFO = "key_outlet_info"
+        private const val KEY_RECEIPT_CONFIG = "key_receipt_config"
+        private const val KEY_ADDITIONAL_FEES = "key_additional_fees"
+        private const val KEY_ORDER_METHODS = "key_order_methods"
+        private const val KEY_PAYMENT_GATEWAYS = "key_payment_gateways"
+        private const val KEY_EMPLOYEES = "key_employees"
+        private const val KEY_ACTIVE_EMPLOYEE = "key_active_employee"
+        private const val KEY_ACTIVE_SHIFT = "key_active_shift"
+        private const val KEY_SELECTED_PRINTER = "key_selected_printer"
+        private const val KEY_SELECTED_PRINTER_NAME = "key_selected_printer_name"
+        private const val KEY_CART_DRAFT = "key_cart_draft"
+        private const val KEY_IS_INITIALIZED = "key_is_initialized"
+        private const val KEY_MASTER_CATALOG_SEEDED = "key_master_catalog_seeded"
+        private const val KEY_CLEAN_WIPE_PERFORMED_V1 = "key_clean_wipe_performed_v1"
+
+        fun normalizeShift(raw: String): String {
+            return when {
+                raw.contains("Shift 2", ignoreCase = true) || raw.contains("Sore", ignoreCase = true) -> "Shift 2"
+                raw.contains("Event", ignoreCase = true) || raw.contains("Khusus", ignoreCase = true) -> "Event"
+                else -> "Shift 1"
+            }
+        }
+
+        fun defaultOwnerEmployee(): EmployeeItem = EmployeeItem(
+            id = "emp_owner",
+            name = "Rangga Maheza",
+            role = "Owner",
+            shift = "Shift 1",
+            pin = "0000"
+        )
+    }
+
+    fun isCleanWipeDone(): Boolean = prefs.getBoolean(KEY_CLEAN_WIPE_PERFORMED_V1, false)
+
+    fun markCleanWipeDone() {
+        prefs.edit().putBoolean(KEY_CLEAN_WIPE_PERFORMED_V1, true).apply()
+    }
+
+    fun isMasterCatalogSeeded(): Boolean = prefs.getBoolean(KEY_MASTER_CATALOG_SEEDED, false)
+
+    fun markMasterCatalogSeeded() {
+        prefs.edit().putBoolean(KEY_MASTER_CATALOG_SEEDED, true).apply()
+    }
+
+    /**
+     * Initializes default configuration only on fresh first-time installation.
+     * Staff directory starts empty except for the default Super Admin / Owner account.
+     */
+    fun initDefaultsIfEmpty() {
+        if (!prefs.getBoolean(KEY_IS_INITIALIZED, false)) {
+            saveOutletInfo(OutletInfo())
+            saveReceiptCustomizer(ReceiptCustomizerConfig())
+            saveAdditionalFees(AdditionalFeesConfig())
+            saveOrderMethods(OrderMethodsConfig())
+            savePaymentGateways(PaymentGatewaysConfig())
+
+            val owner = defaultOwnerEmployee()
+            saveEmployees(listOf(owner))
+            saveActiveEmployee(owner)
+            saveActiveShift("Shift 1")
+            saveSelectedPrinter("")
+
+            prefs.edit().putBoolean(KEY_IS_INITIALIZED, true).apply()
+        }
+    }
+
+    // ==========================================
+    // 1. OUTLET INFORMATION
+    // ==========================================
+    fun saveOutletInfo(info: OutletInfo) {
+        val json = JSONObject().apply {
+            put("name", info.name)
+            put("branch", info.branch)
+            put("address", info.address)
+            put("phone", info.phone)
+            put("taxId", info.taxId)
+            put("instagram", info.instagram)
+            put("ownerWhatsAppNumber", info.ownerWhatsAppNumber)
+        }
+        prefs.edit().putString(KEY_OUTLET_INFO, json.toString()).apply()
+    }
+
+    fun loadOutletInfo(): OutletInfo {
+        val raw = prefs.getString(KEY_OUTLET_INFO, null) ?: return OutletInfo()
+        return try {
+            val json = JSONObject(raw)
+            OutletInfo(
+                name = json.optString("name", "BDS Coffee Company"),
+                branch = json.optString("branch", "Senopati Roastery"),
+                address = json.optString("address", "Jl. Senopati No. 42, Kebayoran Baru, Jakarta Selatan"),
+                phone = json.optString("phone", "+62 812-9988-7766"),
+                taxId = json.optString("taxId", "01.234.567.8-012.000"),
+                instagram = json.optString("instagram", "@bdscoffeecompany"),
+                ownerWhatsAppNumber = json.optString("ownerWhatsAppNumber", "")
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            OutletInfo()
+        }
+    }
+
+    // ==========================================
+    // 2. RECEIPT DISPLAY CUSTOMIZER
+    // ==========================================
+    fun saveReceiptCustomizer(config: ReceiptCustomizerConfig) {
+        val json = JSONObject().apply {
+            put("paperSize", config.paperSize)
+            put("showLogo", config.showLogo)
+            put("showTax", config.showTax)
+            put("headerNote", config.headerNote)
+            put("footerNote", config.footerNote)
+            put("printCopies", config.printCopies)
+        }
+        prefs.edit().putString(KEY_RECEIPT_CONFIG, json.toString()).apply()
+    }
+
+    fun loadReceiptCustomizer(): ReceiptCustomizerConfig {
+        val raw = prefs.getString(KEY_RECEIPT_CONFIG, null) ?: return ReceiptCustomizerConfig()
+        return try {
+            val json = JSONObject(raw)
+            ReceiptCustomizerConfig(
+                paperSize = json.optString("paperSize", "58mm"),
+                showLogo = json.optBoolean("showLogo", true),
+                showTax = json.optBoolean("showTax", true),
+                headerNote = json.optString("headerNote", "BDS COFFEE COMPANY"),
+                footerNote = json.optString("footerNote", "Terima kasih atas pembelian Anda."),
+                printCopies = json.optInt("printCopies", 1)
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            ReceiptCustomizerConfig()
+        }
+    }
+
+    // ==========================================
+    // 3. TAX & SERVICE CHARGE (ADDITIONAL FEES)
+    // ==========================================
+    fun saveAdditionalFees(config: AdditionalFeesConfig) {
+        val json = JSONObject().apply {
+            put("isTaxEnabled", config.isTaxEnabled)
+            put("taxPercentage", config.taxPercentage)
+            put("isServiceFeeEnabled", config.isServiceFeeEnabled)
+            put("serviceFeePercentage", config.serviceFeePercentage)
+            put("isTakeawayPackagingEnabled", config.isTakeawayPackagingEnabled)
+            put("takeawayPackagingFee", config.takeawayPackagingFee)
+            put("isTakeawayFeePerItem", config.isTakeawayFeePerItem)
+            put("isRoundingEnabled", config.isRoundingEnabled)
+        }
+        prefs.edit().putString(KEY_ADDITIONAL_FEES, json.toString()).apply()
+    }
+
+    fun loadAdditionalFees(): AdditionalFeesConfig {
+        val raw = prefs.getString(KEY_ADDITIONAL_FEES, null) ?: return AdditionalFeesConfig()
+        return try {
+            val json = JSONObject(raw)
+            AdditionalFeesConfig(
+                isTaxEnabled = json.optBoolean("isTaxEnabled", true),
+                taxPercentage = json.optDouble("taxPercentage", 10.0),
+                isServiceFeeEnabled = json.optBoolean("isServiceFeeEnabled", true),
+                serviceFeePercentage = json.optDouble("serviceFeePercentage", 2.5),
+                isTakeawayPackagingEnabled = json.optBoolean("isTakeawayPackagingEnabled", false),
+                takeawayPackagingFee = json.optDouble("takeawayPackagingFee", 2000.0),
+                isTakeawayFeePerItem = json.optBoolean("isTakeawayFeePerItem", true),
+                isRoundingEnabled = json.optBoolean("isRoundingEnabled", true)
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            AdditionalFeesConfig()
+        }
+    }
+
+    // ==========================================
+    // 4. ORDER METHODS CONFIG
+    // ==========================================
+    fun saveOrderMethods(config: OrderMethodsConfig) {
+        val json = JSONObject().apply {
+            put("isDineInEnabled", config.isDineInEnabled)
+            put("isTakeAwayEnabled", config.isTakeAwayEnabled)
+            put("isOnlineDeliveryEnabled", config.isOnlineDeliveryEnabled)
+            put("isTableNumberRequired", config.isTableNumberRequired)
+        }
+        prefs.edit().putString(KEY_ORDER_METHODS, json.toString()).apply()
+    }
+
+    fun loadOrderMethods(): OrderMethodsConfig {
+        val raw = prefs.getString(KEY_ORDER_METHODS, null) ?: return OrderMethodsConfig()
+        return try {
+            val json = JSONObject(raw)
+            OrderMethodsConfig(
+                isDineInEnabled = json.optBoolean("isDineInEnabled", true),
+                isTakeAwayEnabled = json.optBoolean("isTakeAwayEnabled", true),
+                isOnlineDeliveryEnabled = json.optBoolean("isOnlineDeliveryEnabled", true),
+                isTableNumberRequired = json.optBoolean("isTableNumberRequired", true)
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            OrderMethodsConfig()
+        }
+    }
+
+    // ==========================================
+    // 5. PAYMENT GATEWAYS CONFIG
+    // ==========================================
+    fun savePaymentGateways(config: PaymentGatewaysConfig) {
+        val json = JSONObject().apply {
+            put("isCashEnabled", config.isCashEnabled)
+            put("isQrisEnabled", config.isQrisEnabled)
+            put("qrisMerchantName", config.qrisMerchantName)
+            put("qrisNmid", config.qrisNmid)
+            put("qrisTerminal", config.qrisTerminal)
+            put("isBankTransferEnabled", config.isBankTransferEnabled)
+            put("bcaAccount", config.bcaAccount)
+            put("mandiriAccount", config.mandiriAccount)
+        }
+        prefs.edit().putString(KEY_PAYMENT_GATEWAYS, json.toString()).apply()
+    }
+
+    fun loadPaymentGateways(): PaymentGatewaysConfig {
+        val raw = prefs.getString(KEY_PAYMENT_GATEWAYS, null) ?: return PaymentGatewaysConfig()
+        return try {
+            val json = JSONObject(raw)
+            PaymentGatewaysConfig(
+                isCashEnabled = json.optBoolean("isCashEnabled", true),
+                isQrisEnabled = json.optBoolean("isQrisEnabled", true),
+                qrisMerchantName = json.optString("qrisMerchantName", "BDS COFFEE CO"),
+                qrisNmid = json.optString("qrisNmid", "ID1024365195063"),
+                qrisTerminal = json.optString("qrisTerminal", "A01"),
+                isBankTransferEnabled = json.optBoolean("isBankTransferEnabled", true),
+                bcaAccount = json.optString("bcaAccount", "BCA 827-019-2819 a/n PT Caffeinery Retail"),
+                mandiriAccount = json.optString("mandiriAccount", "Mandiri 137-00-1928374-1 a/n Caffeinery Coffee")
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            PaymentGatewaysConfig()
+        }
+    }
+
+    // ==========================================
+    // 6. EMPLOYEES & ACTIVE SHIFT
+    // ==========================================
+    fun saveEmployees(list: List<EmployeeItem>) {
+        val arr = JSONArray()
+        list.forEach { emp ->
+            val obj = JSONObject().apply {
+                put("id", emp.id)
+                put("name", emp.name)
+                put("role", emp.role)
+                put("shift", emp.shift)
+                put("pin", emp.pin)
+                put("isActive", emp.isActive)
+            }
+            arr.put(obj)
+        }
+        prefs.edit().putString(KEY_EMPLOYEES, arr.toString()).apply()
+    }
+
+    fun loadEmployees(): List<EmployeeItem> {
+        val raw = prefs.getString(KEY_EMPLOYEES, null)
+        if (raw.isNullOrBlank() || raw.trim() == "[]") {
+            val defaultStaff = listOf(defaultOwnerEmployee())
+            saveEmployees(defaultStaff)
+            return defaultStaff
+        }
+        return try {
+            val arr = JSONArray(raw)
+            val result = mutableListOf<EmployeeItem>()
+            var needsMigration = false
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val id = obj.optString("id", java.util.UUID.randomUUID().toString())
+                val role = obj.optString("role", "Kasir")
+                var pin = obj.optString("pin", "")
+                if ((id == "emp_owner" || role.equals("owner", ignoreCase = true)) && (pin == "8888" || pin.isEmpty())) {
+                    pin = "0000"
+                    needsMigration = true
+                }
+                result.add(
+                    EmployeeItem(
+                        id = id,
+                        name = obj.optString("name", "Karyawan"),
+                        role = role,
+                        shift = normalizeShift(obj.optString("shift", "Shift 1")),
+                        pin = pin,
+                        isActive = obj.optBoolean("isActive", true)
+                    )
+                )
+            }
+            if (needsMigration) {
+                saveEmployees(result)
+            }
+            result
+        } catch (e: Exception) {
+            e.printStackTrace()
+            emptyList()
+        }
+    }
+
+    fun saveActiveEmployee(emp: EmployeeItem) {
+        val json = JSONObject().apply {
+            put("id", emp.id)
+            put("name", emp.name)
+            put("role", emp.role)
+            put("shift", emp.shift)
+            put("pin", emp.pin)
+            put("isActive", emp.isActive)
+        }
+        prefs.edit().putString(KEY_ACTIVE_EMPLOYEE, json.toString()).apply()
+    }
+
+    fun loadActiveEmployee(): EmployeeItem {
+        val raw = prefs.getString(KEY_ACTIVE_EMPLOYEE, null)
+        if (raw.isNullOrBlank()) {
+            return EmployeeItem(id = "", name = "Belum Ada Kasir", role = "Staff", shift = "Shift 1", pin = "")
+        }
+        return try {
+            val json = JSONObject(raw)
+            EmployeeItem(
+                id = json.optString("id", ""),
+                name = json.optString("name", "Belum Ada Kasir"),
+                role = json.optString("role", "Staff"),
+                shift = normalizeShift(json.optString("shift", "Shift 1")),
+                pin = json.optString("pin", ""),
+                isActive = json.optBoolean("isActive", true)
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            EmployeeItem(id = "", name = "Belum Ada Kasir", role = "Staff", shift = "Shift 1", pin = "")
+        }
+    }
+
+    fun saveActiveShift(shift: String) {
+        prefs.edit().putString(KEY_ACTIVE_SHIFT, normalizeShift(shift)).apply()
+    }
+
+    fun loadActiveShift(): String {
+        val raw = prefs.getString(KEY_ACTIVE_SHIFT, "Shift 1") ?: "Shift 1"
+        return normalizeShift(raw)
+    }
+
+    // ==========================================
+    // 7. SELECTED THERMAL PRINTER
+    // ==========================================
+    fun saveSelectedPrinter(address: String, name: String = "") {
+        prefs.edit()
+            .putString(KEY_SELECTED_PRINTER, address)
+            .putString(KEY_SELECTED_PRINTER_NAME, name)
+            .apply()
+    }
+
+    fun loadSelectedPrinter(): String {
+        return prefs.getString(KEY_SELECTED_PRINTER, "") ?: ""
+    }
+
+    fun loadSelectedPrinterName(): String {
+        return prefs.getString(KEY_SELECTED_PRINTER_NAME, "") ?: ""
+    }
+
+    // ==========================================
+    // 8. CART & DRAFT RECOVERY
+    // ==========================================
+    data class CartDraft(
+        val itemsJson: String,
+        val customerName: String,
+        val orderType: String,
+        val discountType: String,
+        val discountValue: Double,
+        val timestamp: Long = System.currentTimeMillis()
+    )
+
+    fun saveActiveCartDraft(
+        itemsJson: String,
+        customerName: String,
+        orderType: String,
+        discountType: String,
+        discountValue: Double
+    ) {
+        val json = JSONObject().apply {
+            put("itemsJson", itemsJson)
+            put("customerName", customerName)
+            put("orderType", orderType)
+            put("discountType", discountType)
+            put("discountValue", discountValue)
+            put("timestamp", System.currentTimeMillis())
+        }
+        prefs.edit().putString(KEY_CART_DRAFT, json.toString()).apply()
+    }
+
+    fun loadActiveCartDraft(): CartDraft? {
+        val raw = prefs.getString(KEY_CART_DRAFT, null) ?: return null
+        return try {
+            val json = JSONObject(raw)
+            CartDraft(
+                itemsJson = json.optString("itemsJson", "[]"),
+                customerName = json.optString("customerName", ""),
+                orderType = json.optString("orderType", "DINE_IN"),
+                discountType = json.optString("discountType", "NONE"),
+                discountValue = json.optDouble("discountValue", 0.0),
+                timestamp = json.optLong("timestamp", System.currentTimeMillis())
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
+    fun clearActiveCartDraft() {
+        prefs.edit().remove(KEY_CART_DRAFT).apply()
+    }
+
+    fun wipeAllStaffAndDrafts() {
+        clearActiveCartDraft()
+        val owner = defaultOwnerEmployee()
+        saveEmployees(listOf(owner))
+        saveActiveEmployee(owner)
+        saveActiveShift("Shift 1")
+        prefs.edit().putBoolean(KEY_MASTER_CATALOG_SEEDED, false).apply()
+    }
+}
